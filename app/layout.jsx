@@ -1,13 +1,13 @@
-import { Figtree, Fraunces, IBM_Plex_Mono } from "next/font/google";
+import { IBM_Plex_Mono, Plus_Jakarta_Sans, Source_Serif_4 } from "next/font/google";
 import "./globals.css";
 
-const sans = Figtree({
+const sans = Plus_Jakarta_Sans({
   subsets: ["latin"],
   variable: "--font-sans",
   display: "swap",
 });
 
-const serif = Fraunces({
+const serif = Source_Serif_4({
   subsets: ["latin"],
   variable: "--font-serif",
   display: "swap",

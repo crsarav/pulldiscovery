@@ -163,29 +163,13 @@ export default function Page() {
 
   return (
     <div className="app">
-      <aside className="rail">
-        <div className="brand">
-          <p className="eyebrow">Exponentials demo</p>
-          <h1>Pull Discovery</h1>
-          <p className="thesis">
-            A persuasive generated answer is not the same as a verified result.
-            Generation happens inside the model. Tiers are computed after, on
-            the server.
-          </p>
-        </div>
-        <WorldModel
-          facts={facts}
-          setFacts={setFacts}
-          transfers={transfers}
-          setTransfers={setTransfers}
-          activeProfile={activeProfile}
-          seedProfile={seedProfile}
-          domain={domain}
-        />
-      </aside>
-      <main className="main">
-        <div className="topbar">
-          <div className="tabs">
+      <header className="nav">
+        <div className="nav-inner">
+          <a className="logo" href="/">
+            <span className="logo-mark" aria-hidden="true" />
+            Pull
+          </a>
+          <nav className="tabs">
             <button
               className={tab === "discover" ? "active" : ""}
               onClick={() => setTab("discover")}
@@ -198,26 +182,48 @@ export default function Page() {
             >
               Evaluation
             </button>
-          </div>
-          <div className="trust-flag">
-            Trust boundary · harvest then verify · never trust the prose
+          </nav>
+          <div className="nav-end">
+            <span>Verified after generation</span>
           </div>
         </div>
+      </header>
+      <div className="page">
         {tab === "discover" ? (
-          <Discover
-            query={query}
-            setQuery={setQuery}
-            domain={domain}
-            setDomain={setDomain}
-            model={model}
-            setModel={setModel}
-            forceFail={forceFail}
-            setForceFail={setForceFail}
-            loading={loading}
-            onPull={retrieve}
-            results={results}
-            meta={meta}
-          />
+          <>
+            <header className="hero">
+              <h1>Pull only what the web can prove.</h1>
+              <p>
+                Generation stays inside the model. Exact, host, and none are
+                computed on the server after search URLs are harvested.
+              </p>
+            </header>
+            <div className="stage">
+              <Discover
+                query={query}
+                setQuery={setQuery}
+                domain={domain}
+                setDomain={setDomain}
+                model={model}
+                setModel={setModel}
+                forceFail={forceFail}
+                setForceFail={setForceFail}
+                loading={loading}
+                onPull={retrieve}
+                results={results}
+                meta={meta}
+              />
+              <WorldModel
+                facts={facts}
+                setFacts={setFacts}
+                transfers={transfers}
+                setTransfers={setTransfers}
+                activeProfile={activeProfile}
+                seedProfile={seedProfile}
+                domain={domain}
+              />
+            </div>
+          </>
         ) : (
           <Evaluation
             running={evalRunning}
@@ -227,7 +233,7 @@ export default function Page() {
             model={model}
           />
         )}
-      </main>
+      </div>
     </div>
   );
 }
@@ -246,10 +252,17 @@ function Discover({
   results,
   meta,
 }) {
+  const samples = [
+    { ...SAMPLE_QUERIES[0], label: "Waterproof shoes" },
+    { ...SAMPLE_QUERIES[1], label: "After-hours care" },
+    { ...SAMPLE_QUERIES[2], label: "Robotics camp" },
+    { ...SAMPLE_QUERIES[3], label: "Trade contractors" },
+  ];
+
   return (
-    <div className="workspace">
+    <div>
       <form
-        className="composer"
+        className="panel composer"
         onSubmit={(e) => {
           e.preventDefault();
           onPull();
@@ -260,6 +273,11 @@ function Discover({
           onChange={(e) => setQuery(e.target.value)}
           placeholder="What should be pulled from the world, not invented?"
         />
+        <div className="composer-row">
+          <button className="btn" disabled={loading} type="submit">
+            {loading ? "Pulling…" : "Pull destinations"}
+          </button>
+        </div>
         <div className="composer-row">
           <div className="seg" role="group" aria-label="Domain">
             {DOMAINS.map((d) => (
@@ -279,33 +297,28 @@ function Discover({
               className={model === "anthropic" ? "active" : ""}
               onClick={() => setModel("anthropic")}
             >
-              Claude 3.5 + search
+              Claude 3.5
             </button>
             <button
               type="button"
               className={model === "google" ? "active" : ""}
               onClick={() => setModel("google")}
             >
-              Gemini 2.5 + grounding
+              Gemini 2.5
             </button>
           </div>
         </div>
-        <div className="composer-row">
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={forceFail}
-              onChange={(e) => setForceFail(e.target.checked)}
-            />
-            Intentional failure
-          </label>
-          <button className="btn" disabled={loading} type="submit">
-            {loading ? "Pulling…" : "Pull"}
-          </button>
-        </div>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={forceFail}
+            onChange={(e) => setForceFail(e.target.checked)}
+          />
+          Intentional failure
+        </label>
       </form>
       <div className="samples">
-        {SAMPLE_QUERIES.map((item) => (
+        {samples.map((item) => (
           <button
             key={item.id}
             type="button"
@@ -314,7 +327,7 @@ function Discover({
               setDomain(item.domain);
             }}
           >
-            {item.domain}: {item.query.slice(0, 72)}…
+            {item.label}
           </button>
         ))}
       </div>
@@ -327,22 +340,83 @@ function Discover({
       ) : null}
       {results.length === 0 && !loading ? (
         <div className="empty">
-          No destinations yet. Load a profile, pick a domain, and pull. Exact
-          means the generated URL was in the search-tool harvest. Host means the
-          path was invented. None means the URL was never seen.
+          Load a profile, then pull. Exact means the URL was in the search-tool
+          harvest. Host means the path was invented. None means it was never
+          seen.
         </div>
-      ) : (
-        <div className="results">
-          {results.map((result) => (
-            <ResultCard
-              key={`${result.host}${result.pathname}${result.url}`}
-              result={result}
-              constraints={meta.constraints}
-              harvestedUrls={meta.harvestedUrls}
+      ) : results.length ? (
+        <>
+          <TierMix results={results} />
+          <div className="results">
+            {results.map((result) => (
+              <ResultCard
+                key={`${result.host}${result.pathname}${result.url}`}
+                result={result}
+                constraints={meta.constraints}
+                harvestedUrls={meta.harvestedUrls}
+              />
+            ))}
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function TierMix({ results }) {
+  const exact = results.filter((r) => r.tier === "exact").length;
+  const host = results.filter((r) => r.tier === "host").length;
+  const none = results.filter((r) => r.tier === "none").length;
+  const total = results.length || 1;
+  const c = 2 * Math.PI * 36;
+  const segs = [
+    { n: exact, color: "#5b53f5" },
+    { n: host, color: "#b7b0d9" },
+    { n: none, color: "#ddd9e8" },
+  ];
+  let offset = 0;
+  return (
+    <div className="mix">
+      <svg width="88" height="88" viewBox="0 0 88 88" aria-hidden="true">
+        <circle cx="44" cy="44" r="36" fill="none" stroke="#f3f0f8" strokeWidth="10" />
+        {segs.map((seg) => {
+          const dash = (seg.n / total) * c;
+          const circle = (
+            <circle
+              key={seg.color}
+              cx="44"
+              cy="44"
+              r="36"
+              fill="none"
+              stroke={seg.color}
+              strokeWidth="10"
+              strokeDasharray={`${dash} ${c - dash}`}
+              strokeDashoffset={-offset}
+              strokeLinecap="butt"
+              transform="rotate(-90 44 44)"
             />
-          ))}
+          );
+          offset += dash;
+          return circle;
+        })}
+      </svg>
+      <div>
+        <h2>Verification mix</h2>
+        <div className="legend">
+          <div>
+            <span className="dot" style={{ background: "#5b53f5" }} />
+            <b>{Math.round((exact / total) * 100)}%</b> exact
+          </div>
+          <div>
+            <span className="dot" style={{ background: "#b7b0d9" }} />
+            <b>{Math.round((host / total) * 100)}%</b> host
+          </div>
+          <div>
+            <span className="dot" style={{ background: "#ddd9e8" }} />
+            <b>{Math.round((none / total) * 100)}%</b> none
+          </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -350,38 +424,33 @@ function Discover({
 function ResultCard({ result, constraints, harvestedUrls }) {
   const why = formatWhy(result, constraints);
   return (
-    <article className={`card ${result.tier}`}>
-      <div className="stripe" />
-      <div className="card-body">
-        <div className="card-head">
-          <div>
-            <h3>{result.name}</h3>
-            <a className="meta" href={result.url} target="_blank" rel="noreferrer">
-              {result.url}
-            </a>
-          </div>
-          <span className={`badge ${result.tier}`}>{result.tier}</span>
+    <article className="card">
+      <div className="card-head">
+        <div>
+          <h3>{result.name}</h3>
+          <a className="meta" href={result.url} target="_blank" rel="noreferrer">
+            {result.url}
+          </a>
         </div>
-        <p className="why">{why}</p>
-        {result.note ? <p className="why muted">{result.note}</p> : null}
-        <div className="badge-row">
-          <span className="badge muted">
-            corroborated ×{result.corroboration || 1}
+        <span className={`badge ${result.tier}`}>{result.tier}</span>
+      </div>
+      <p className="why">{why}</p>
+      {result.note ? <p className="why muted">{result.note}</p> : null}
+      <div className="badge-row">
+        <span className="badge">corroborated ×{result.corroboration || 1}</span>
+        {(result.constraintIndices || []).map((i) => (
+          <span className="badge" key={i}>
+            constraint {i}
           </span>
-          {(result.constraintIndices || []).map((i) => (
-            <span className="badge muted" key={i}>
-              constraint {i}
-            </span>
-          ))}
-        </div>
-        <div className="ledger">
-          generated {result.url}
-          <br />
-          matched {result.matchedUrl || "—"}
-          <br />
-          harvested {harvestedUrls.length} search URLs · host {result.host}
-          {result.pathname}
-        </div>
+        ))}
+      </div>
+      <div className="ledger">
+        generated {result.url}
+        <br />
+        matched {result.matchedUrl || "—"}
+        <br />
+        harvested {harvestedUrls.length} search URLs · {result.host}
+        {result.pathname}
       </div>
     </article>
   );
@@ -402,7 +471,14 @@ function WorldModel({
     confidence: 0.8,
     scopes: ["ecommerce"],
   });
-  const pending = transfers.filter((t) => t.status === "held").slice(0, 8);
+  const pending = [];
+  const seenHeld = new Set();
+  for (const entry of transfers.filter((t) => t.status === "held")) {
+    const key = `${entry.factId}:${entry.toDomain}`;
+    if (seenHeld.has(key)) continue;
+    seenHeld.add(key);
+    pending.push(entry);
+  }
 
   function addFact(e) {
     e.preventDefault();
@@ -449,9 +525,9 @@ function WorldModel({
   }
 
   return (
-    <div className="rail-body">
-      <div className="section-title">
-        <h2>World model</h2>
+    <aside className="panel white side">
+      <div className="side-head">
+        <h2>Current profile</h2>
         <span className="muted">{activeProfile || "empty"}</span>
       </div>
       <div className="profile-grid">
@@ -498,7 +574,7 @@ function WorldModel({
           value={draft.confidence}
           onChange={(e) => setDraft({ ...draft, confidence: e.target.value })}
         />
-        <button className="btn small" type="submit">
+        <button className="btn ghost" type="submit">
           Add fact
         </button>
       </form>
@@ -518,7 +594,7 @@ function WorldModel({
           Delete all
         </button>
       </div>
-      <div className="results" style={{ marginTop: 12 }}>
+      <div className="fact-list">
         {facts.map((fact) => (
           <div
             key={fact.id}
@@ -603,19 +679,22 @@ function WorldModel({
           </div>
         ))
       )}
-    </div>
+    </aside>
   );
 }
 
 function Evaluation({ running, onRun, runs, summary, model }) {
   return (
-    <div className="workspace">
-      <p className="thesis" style={{ color: "var(--ink-soft)", maxWidth: 640 }}>
-        Same four queries, every time. Resolvable-destination rate is the share
-        of destinations whose URL exactly matched a harvested search-tool URL.
-        Client code does not compute tiers.
-      </p>
-      <div className="composer-row" style={{ marginTop: 16 }}>
+    <>
+      <header className="hero">
+        <h1>Same four queries, every time.</h1>
+        <p className="eval-intro">
+          Resolvable-destination rate is the share of destinations whose URL
+          exactly matched a harvested search-tool URL. The client never computes
+          tiers.
+        </p>
+      </header>
+      <div className="eval-actions">
         <button className="btn" onClick={onRun} disabled={running}>
           {running ? "Running suite…" : `Run eval against ${model}`}
         </button>
@@ -653,6 +732,6 @@ function Evaluation({ running, onRun, runs, summary, model }) {
           </div>
         ))}
       </div>
-    </div>
+    </>
   );
 }
