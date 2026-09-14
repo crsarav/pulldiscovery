@@ -304,7 +304,7 @@ function Discover({
               className={model === "google" ? "active" : ""}
               onClick={() => setModel("google")}
             >
-              Gemini 2.5
+              Gemini
             </button>
           </div>
         </div>
