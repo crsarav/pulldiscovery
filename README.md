@@ -6,7 +6,7 @@ Generation happens inside Claude or Gemini. URL verification is computed afterwa
 
 ## What it shows
 
-- **Model router** — `anthropic` (`claude-3-5-sonnet-20241022` + `web_search_20250305`) or `google` (`gemini-2.5-pro` + Google Search Grounding).
+- **Model router** — `anthropic` (`claude-sonnet-5` + `web_search_20250305`) or `google` (`gemini-2.5-pro` + Google Search Grounding). Override with `ANTHROPIC_MODEL` / `GEMINI_MODEL`.
 - **Intentional failure** — `forceFail: true` skips the LLM and returns `"Discovery intentionally aborted by user."`
 - **Server-side harvest + verification** — every generated destination is tagged `exact`, `host`, or `none` from search-tool URLs. Prompt templates never leave the server.
 - **Entity resolution** — client merges `host + pathname` and shows a corroboration count.

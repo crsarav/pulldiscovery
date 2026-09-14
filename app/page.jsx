@@ -297,7 +297,7 @@ function Discover({
               className={model === "anthropic" ? "active" : ""}
               onClick={() => setModel("anthropic")}
             >
-              Claude 3.5
+              Claude
             </button>
             <button
               type="button"
