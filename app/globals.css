@@ -198,6 +198,13 @@ a {
   margin: 18px 0 8px;
 }
 
+.pull-stamp {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
 .boundary-col {
   background: var(--wash);
   border-radius: 20px;

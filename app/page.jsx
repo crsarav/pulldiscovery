@@ -100,6 +100,7 @@ export default function Page() {
   const [forceFail, setForceFail] = useState(false);
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState([]);
+  const [pullContext, setPullContext] = useState(null);
   const [meta, setMeta] = useState(emptyMeta);
   const [evalRuns, setEvalRuns] = useState([]);
   const [evalRunning, setEvalRunning] = useState(false);
@@ -473,6 +474,13 @@ export default function Page() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Discover failed");
       setResults(mergeEntities(data.results || []));
+      setPullContext({
+        profileId: activeProfileRef.current,
+        domain: nextDomain,
+        query: nextQuery,
+        allowed: partitioned.allowed,
+        held: partitioned.held,
+      });
       setMeta({
         message: data.message || "",
         usedDemo: Boolean(data.usedDemo),
@@ -485,6 +493,7 @@ export default function Page() {
       });
     } catch (error) {
       setResults([]);
+      setPullContext(null);
       setMeta({ ...emptyMeta, message: error.message });
     } finally {
       setLoading(false);
@@ -508,6 +517,7 @@ export default function Page() {
     setQuery(SHOE_QUERY.query);
     setDomain("ecommerce");
     setResults([]);
+    setPullContext(null);
     setFeedbackNote("");
     setBeat(1);
     setTab("discover");
@@ -688,6 +698,8 @@ export default function Page() {
                 loading={loading}
                 onPull={() => retrieve()}
                 results={results}
+                pullContext={pullContext}
+                customProfiles={customProfiles}
                 meta={meta}
                 allowed={allowed}
                 held={held}
@@ -788,6 +800,8 @@ function BoundaryBoard({
   pendingHolds,
   onApproveHold,
   onKeepHold,
+  readonly,
+  caption,
 }) {
   const holdByFact = new Map(
     pendingHolds.map((entry) => [entry.factId, entry])
@@ -795,8 +809,13 @@ function BoundaryBoard({
 
   return (
     <section className="boundary">
+      {caption ? <p className="pull-stamp">{caption}</p> : null}
       <div className="boundary-col">
-        <h3>This {domain} search can use</h3>
+        <h3>
+          {readonly
+            ? `This ${domain} pull used`
+            : `This ${domain} search can use`}
+        </h3>
         {allowed.length === 0 ? (
           <p className="muted">
             Nothing from the world model is in scope yet. Load a profile, or
@@ -811,16 +830,23 @@ function BoundaryBoard({
         )}
       </div>
       <div className={`boundary-col hold ${held.length ? "alert" : ""}`}>
-        <h3>Not in this search unless you allow it</h3>
+        <h3>
+          {readonly
+            ? `Held out of this ${domain} pull`
+            : "Not in this search unless you allow it"}
+        </h3>
         {held.length === 0 ? (
           <p className="muted">
-            Every loaded fact is already allowed for {domain}.
+            {readonly
+              ? `Every in-scope fact was allowed for this ${domain} pull.`
+              : `Every loaded fact is already allowed for ${domain}.`}
           </p>
         ) : (
           <>
             <p className="boundary-note">
-              Same person, different part of life. Each fact below stays out of
-              this {domain} search until you choose.
+              {readonly
+                ? "These facts were not sent to the model. Switching profile does not rerun search."
+                : `Same person, different part of life. Each fact below stays out of this ${domain} search until you choose.`}
             </p>
             <div className="hold-list">
               {held.map((fact) => {
@@ -839,25 +865,27 @@ function BoundaryBoard({
                   <article className="hold-card" key={fact.id}>
                     <p>{fact.text}</p>
                     <p className="muted">
-                      Allowed in {scopes}. This search is {domain}, so it is
-                      sitting out.
+                      Allowed in {scopes}. This search is {domain}, so it
+                      {readonly ? " was not used." : " is sitting out."}
                     </p>
-                    <div className="actions">
-                      <button
-                        className="icon-btn"
-                        type="button"
-                        onClick={() => onApproveHold(entry)}
-                      >
-                        Use in {domain}
-                      </button>
-                      <button
-                        className="icon-btn"
-                        type="button"
-                        onClick={() => onKeepHold(entry)}
-                      >
-                        Keep out
-                      </button>
-                    </div>
+                    {readonly ? null : (
+                      <div className="actions">
+                        <button
+                          className="icon-btn"
+                          type="button"
+                          onClick={() => onApproveHold(entry)}
+                        >
+                          Use in {domain}
+                        </button>
+                        <button
+                          className="icon-btn"
+                          type="button"
+                          onClick={() => onKeepHold(entry)}
+                        >
+                          Keep out
+                        </button>
+                      </div>
+                    )}
                   </article>
                 );
               })}
@@ -881,6 +909,8 @@ function Discover({
   loading,
   onPull,
   results,
+  pullContext,
+  customProfiles,
   meta,
   allowed,
   held,
@@ -897,6 +927,13 @@ function Discover({
     { ...SAMPLE_QUERIES[2], label: "Robotics camp" },
     { ...SAMPLE_QUERIES[3], label: "Trade contractors" },
   ];
+  const frozen = Boolean(results.length && pullContext);
+  const boardDomain = frozen ? pullContext.domain : domain;
+  const boardAllowed = frozen ? pullContext.allowed : allowed;
+  const boardHeld = frozen ? pullContext.held : held;
+  const pullName = frozen
+    ? displayProfileName(pullContext.profileId, customProfiles)
+    : null;
   const visible = [
     ...results.filter((r) => r.feedback !== "rejected"),
     ...results.filter((r) => r.feedback === "rejected"),
@@ -975,10 +1012,16 @@ function Discover({
         ))}
       </div>
       <BoundaryBoard
-        domain={domain}
-        allowed={allowed}
-        held={held}
-        pendingHolds={pendingHolds}
+        domain={boardDomain}
+        allowed={boardAllowed}
+        held={boardHeld}
+        pendingHolds={frozen ? [] : pendingHolds}
+        readonly={frozen}
+        caption={
+          frozen
+            ? `Showing destinations pulled for ${pullName}. Switching profile does not rerun search.`
+            : null
+        }
         onApproveHold={onApproveHold}
         onKeepHold={onKeepHold}
       />
