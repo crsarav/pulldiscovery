@@ -1,12 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { PROFILE_BUTTONS, DOMAINS, EVAL_QUERIES } from "@/lib/profiles";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { BUILTIN_PROFILES, builtinById, DOMAINS, EVAL_QUERIES } from "@/lib/profiles";
 import { applyTransferDecision, makeTransferEntries, partitionFacts } from "@/lib/scope";
 import { formatWhy, mergeEntities } from "@/lib/retrieve";
 import { resolvableRate } from "@/lib/verification";
+import {
+  CARE_QUERY,
+  SHOE_QUERY,
+  SOURCE_COPY,
+  THESIS_BEATS,
+  TIER_COPY,
+} from "@/lib/thesis";
 
-const STORAGE_KEY = "pull-discovery:v1";
+const STORAGE_KEY = "pull-discovery:v4";
 const SAMPLE_QUERIES = EVAL_QUERIES;
 
 const emptyMeta = {
@@ -19,6 +26,68 @@ const emptyMeta = {
   model: "",
   forceFail: false,
 };
+
+function customFactsByProfile(facts) {
+  const map = {};
+  for (const fact of facts) {
+    if (!fact.custom) continue;
+    const id = fact.profileId || "me";
+    map[id] = [...(map[id] || []), fact];
+  }
+  return map;
+}
+
+function assembleFacts(profileId, extras, overrides, deleted) {
+  const builtin = builtinById(profileId);
+  const deletedSet = new Set(deleted[profileId] || []);
+  const overrideMap = overrides[profileId] || {};
+  const seed = builtin
+    ? builtin
+        .factory()
+        .filter((f) => !deletedSet.has(f.id))
+        .map((f) => ({
+          ...f,
+          seed: true,
+          custom: false,
+          profileId,
+          ...(overrideMap[f.id] || {}),
+        }))
+    : [];
+  return [...seed, ...(extras[profileId] || [])];
+}
+
+function deriveStoresFromFacts(profileId, list) {
+  const builtin = builtinById(profileId);
+  const factory = builtin?.factory() || [];
+  const seedIds = new Set(factory.map((f) => f.id));
+  const extras = list.filter((f) => f.custom || !seedIds.has(f.id));
+  const present = new Set(
+    list.filter((f) => seedIds.has(f.id)).map((f) => f.id)
+  );
+  const deleted = [...seedIds].filter((id) => !present.has(id));
+  const origById = Object.fromEntries(factory.map((f) => [f.id, f]));
+  const overrides = {};
+  for (const f of list) {
+    if (!seedIds.has(f.id)) continue;
+    const orig = origById[f.id];
+    if (!orig) continue;
+    const patch = {};
+    for (const key of [
+      "text",
+      "domain",
+      "confidence",
+      "scopes",
+      "withheld",
+      "source",
+    ]) {
+      if (JSON.stringify(f[key]) !== JSON.stringify(orig[key])) {
+        patch[key] = f[key];
+      }
+    }
+    if (Object.keys(patch).length) overrides[f.id] = patch;
+  }
+  return { extras, deleted, overrides };
+}
 
 export default function Page() {
   const [tab, setTab] = useState("discover");
@@ -34,63 +103,371 @@ export default function Page() {
   const [meta, setMeta] = useState(emptyMeta);
   const [evalRuns, setEvalRuns] = useState([]);
   const [evalRunning, setEvalRunning] = useState(false);
-  const [hydrated, setHydrated] = useState(false);
+  const [feedbackNote, setFeedbackNote] = useState("");
+  const [beat, setBeat] = useState(1);
+  const [customProfiles, setCustomProfiles] = useState([]);
+  const [extrasByProfile, setExtrasByProfile] = useState({});
+  const [seedOverridesByProfile, setSeedOverridesByProfile] = useState({});
+  const [deletedSeedIdsByProfile, setDeletedSeedIdsByProfile] = useState({});
+  const [factsByProfile, setFactsByProfile] = useState({});
+  const extrasRef = useRef(extrasByProfile);
+  const overridesRef = useRef(seedOverridesByProfile);
+  const deletedRef = useRef(deletedSeedIdsByProfile);
+  const factsByProfileRef = useRef(factsByProfile);
+  const factsRef = useRef(facts);
+  const activeProfileRef = useRef(activeProfile);
+  const transfersRef = useRef(transfers);
+  const customProfilesRef = useRef(customProfiles);
+  const hydratedRef = useRef(false);
+  extrasRef.current = extrasByProfile;
+  overridesRef.current = seedOverridesByProfile;
+  deletedRef.current = deletedSeedIdsByProfile;
+  factsByProfileRef.current = factsByProfile;
+  factsRef.current = facts;
+  activeProfileRef.current = activeProfile;
+  transfersRef.current = transfers;
+  customProfilesRef.current = customProfiles;
+
+  function persistNow() {
+    if (!hydratedRef.current) return;
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          facts: factsRef.current,
+          transfers: transfersRef.current,
+          activeProfile: activeProfileRef.current,
+          customProfiles: customProfilesRef.current,
+          extrasByProfile: extrasRef.current,
+          seedOverridesByProfile: overridesRef.current,
+          deletedSeedIdsByProfile: deletedRef.current,
+          factsByProfile: factsByProfileRef.current,
+        })
+      );
+    } catch {
+      /* ignore quota */
+    }
+  }
+
+  function replaceTransfers(next) {
+    const value =
+      typeof next === "function" ? next(transfersRef.current) : next;
+    transfersRef.current = value;
+    setTransfers(value);
+    persistNow();
+  }
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const raw =
+        localStorage.getItem(STORAGE_KEY) ||
+        localStorage.getItem("pull-discovery:v3") ||
+        localStorage.getItem("pull-discovery:v2");
       if (raw) {
         const parsed = JSON.parse(raw);
-        setFacts(parsed.facts || []);
+        const extras =
+          parsed.extrasByProfile ||
+          customFactsByProfile(parsed.facts || []);
+        const overrides = parsed.seedOverridesByProfile || {};
+        const deleted = parsed.deletedSeedIdsByProfile || {};
+        const profiles = parsed.customProfiles || [];
+        const byProfile = { ...(parsed.factsByProfile || {}) };
+        if (
+          parsed.activeProfile &&
+          Array.isArray(parsed.facts) &&
+          parsed.facts.length &&
+          !byProfile[parsed.activeProfile]
+        ) {
+          byProfile[parsed.activeProfile] = parsed.facts;
+        }
+        const ids = new Set([
+          ...Object.keys(byProfile),
+          ...Object.keys(extras),
+          ...["me", "pradeepa", "son"],
+          ...profiles.map((p) => p.id),
+        ]);
+        if (parsed.activeProfile) ids.add(parsed.activeProfile);
+        for (const id of ids) {
+          if (!byProfile[id]) {
+            byProfile[id] = assembleFacts(id, extras, overrides, deleted);
+          }
+        }
+        setCustomProfiles(profiles);
+        setExtrasByProfile(extras);
+        setSeedOverridesByProfile(overrides);
+        setDeletedSeedIdsByProfile(deleted);
+        setFactsByProfile(byProfile);
+        factsByProfileRef.current = byProfile;
+        extrasRef.current = extras;
+        overridesRef.current = overrides;
+        deletedRef.current = deleted;
+        const active = parsed.activeProfile || null;
+        setActiveProfile(active);
+        activeProfileRef.current = active;
+        const nextFacts = active
+          ? byProfile[active] || parsed.facts || []
+          : parsed.facts || [];
+        setFacts(nextFacts);
+        factsRef.current = nextFacts;
         setTransfers(parsed.transfers || []);
-        setActiveProfile(parsed.activeProfile || null);
+        transfersRef.current = parsed.transfers || [];
       }
     } catch {
       /* ignore */
     }
-    setHydrated(true);
+    hydratedRef.current = true;
   }, []);
 
-  useEffect(() => {
-    if (!hydrated) return;
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({ facts, transfers, activeProfile })
-    );
-  }, [facts, transfers, activeProfile, hydrated]);
-
-  function seedProfile(factory, id) {
-    setFacts(factory());
-    setActiveProfile(id);
-    setTransfers([]);
+  function writeProfileSnapshot(profileId, list) {
+    if (!profileId) return;
+    const derived = deriveStoresFromFacts(profileId, list);
+    factsByProfileRef.current = {
+      ...factsByProfileRef.current,
+      [profileId]: list,
+    };
+    extrasRef.current = {
+      ...extrasRef.current,
+      [profileId]: derived.extras,
+    };
+    deletedRef.current = {
+      ...deletedRef.current,
+      [profileId]: derived.deleted,
+    };
+    overridesRef.current = {
+      ...overridesRef.current,
+      [profileId]: derived.overrides,
+    };
+    setFactsByProfile({ ...factsByProfileRef.current });
+    setExtrasByProfile({ ...extrasRef.current });
+    setDeletedSeedIdsByProfile({ ...deletedRef.current });
+    setSeedOverridesByProfile({ ...overridesRef.current });
+    persistNow();
   }
 
-  async function retrieve() {
+  function loadProfile(id) {
+    const previous = activeProfileRef.current;
+    if (previous && previous !== id) {
+      writeProfileSnapshot(previous, factsRef.current);
+    }
+    activeProfileRef.current = id;
+    setActiveProfile(id);
+    replaceTransfers([]);
+    const cached = factsByProfileRef.current[id];
+    const next = Array.isArray(cached)
+      ? cached
+      : assembleFacts(
+          id,
+          extrasRef.current,
+          overridesRef.current,
+          deletedRef.current
+        );
+    factsRef.current = next;
+    factsByProfileRef.current = {
+      ...factsByProfileRef.current,
+      [id]: next,
+    };
+    setFactsByProfile({ ...factsByProfileRef.current });
+    setFacts(next);
+    persistNow();
+  }
+
+  function createProfile(label) {
+    const name = (label || "").trim() || "Untitled";
+    const id = `p-${crypto.randomUUID()}`;
+    const nextProfiles = [
+      ...customProfilesRef.current,
+      { id, label: name },
+    ];
+    customProfilesRef.current = nextProfiles;
+    setCustomProfiles(nextProfiles);
+    factsByProfileRef.current = {
+      ...factsByProfileRef.current,
+      [id]: [],
+    };
+    extrasRef.current = { ...extrasRef.current, [id]: [] };
+    setFactsByProfile({ ...factsByProfileRef.current });
+    setExtrasByProfile({ ...extrasRef.current });
+    loadProfile(id);
+    return id;
+  }
+
+  function renameProfile(id, label) {
+    const name = (label || "").trim();
+    if (!name) return;
+    customProfilesRef.current = customProfilesRef.current.map((p) =>
+      p.id === id ? { ...p, label: name } : p
+    );
+    setCustomProfiles(customProfilesRef.current);
+    persistNow();
+  }
+
+  function deleteProfile(id) {
+    if (builtinById(id)) return;
+    customProfilesRef.current = customProfilesRef.current.filter(
+      (p) => p.id !== id
+    );
+    setCustomProfiles(customProfilesRef.current);
+    const nextFactsByProfile = { ...factsByProfileRef.current };
+    delete nextFactsByProfile[id];
+    factsByProfileRef.current = nextFactsByProfile;
+    setFactsByProfile(nextFactsByProfile);
+    const nextExtras = { ...extrasRef.current };
+    delete nextExtras[id];
+    extrasRef.current = nextExtras;
+    setExtrasByProfile(nextExtras);
+    if (activeProfileRef.current === id) {
+      activeProfileRef.current = null;
+      setActiveProfile(null);
+      factsRef.current = [];
+      setFacts([]);
+      replaceTransfers([]);
+    }
+    persistNow();
+  }
+
+  function addCustomFact(fields) {
+    let profileId = activeProfileRef.current;
+    if (!profileId) {
+      profileId = "me";
+      activeProfileRef.current = profileId;
+      setActiveProfile(profileId);
+      if (!Array.isArray(factsByProfileRef.current.me)) {
+        const seeded = assembleFacts(
+          "me",
+          extrasRef.current,
+          overridesRef.current,
+          deletedRef.current
+        );
+        factsRef.current = seeded;
+        factsByProfileRef.current = {
+          ...factsByProfileRef.current,
+          me: seeded,
+        };
+      } else {
+        factsRef.current = factsByProfileRef.current.me;
+      }
+      setFacts(factsRef.current);
+    }
+    const extra = {
+      ...fields,
+      custom: true,
+      seed: false,
+      profileId,
+    };
+    const next = [extra, ...factsRef.current];
+    factsRef.current = next;
+    setFacts(next);
+    writeProfileSnapshot(profileId, next);
+  }
+
+  function removeFact(id) {
+    const profileId = activeProfileRef.current;
+    const next = factsRef.current.filter((f) => f.id !== id);
+    factsRef.current = next;
+    setFacts(next);
+    if (profileId) writeProfileSnapshot(profileId, next);
+  }
+
+  function patchFact(id, patch) {
+    const profileId = activeProfileRef.current;
+    const next = factsRef.current.map((f) =>
+      f.id === id ? { ...f, ...patch } : f
+    );
+    factsRef.current = next;
+    setFacts(next);
+    if (profileId) writeProfileSnapshot(profileId, next);
+  }
+
+  function clearCurrentProfileFacts() {
+    const id = activeProfileRef.current;
+    factsRef.current = [];
+    setFacts([]);
+    replaceTransfers([]);
+    if (id) writeProfileSnapshot(id, []);
+  }
+
+  function restoreSeedFacts() {
+    const id = activeProfileRef.current;
+    if (!id || !builtinById(id)) return;
+    extrasRef.current = { ...extrasRef.current, [id]: [] };
+    overridesRef.current = { ...overridesRef.current, [id]: {} };
+    deletedRef.current = { ...deletedRef.current, [id]: [] };
+    setExtrasByProfile({ ...extrasRef.current });
+    setSeedOverridesByProfile({ ...overridesRef.current });
+    setDeletedSeedIdsByProfile({ ...deletedRef.current });
+    const next = assembleFacts(
+      id,
+      extrasRef.current,
+      overridesRef.current,
+      deletedRef.current
+    );
+    factsRef.current = next;
+    setFacts(next);
+    writeProfileSnapshot(id, next);
+  }
+
+  const { allowed, held } = useMemo(
+    () => partitionFacts(facts, domain),
+    [facts, domain]
+  );
+
+  const pendingHolds = useMemo(() => {
+    const pending = [];
+    const seen = new Set();
+    for (const entry of transfers.filter(
+      (t) => t.status === "held" && t.toDomain === domain
+    )) {
+      const key = `${entry.factId}:${entry.toDomain}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pending.push(entry);
+    }
+    return pending;
+  }, [transfers, domain]);
+
+  async function retrieve(overrides = {}) {
+    const nextQuery = overrides.query ?? query;
+    const nextDomain = overrides.domain ?? domain;
+    const nextFacts = overrides.facts ?? facts;
+    if (overrides.query) setQuery(overrides.query);
+    if (overrides.domain) setDomain(overrides.domain);
     setLoading(true);
-    const { allowed, held } = partitionFacts(facts, domain);
-    if (held.length && !forceFail) {
-      setTransfers((prev) => {
+    const partitioned = partitionFacts(nextFacts, nextDomain);
+    if (partitioned.held.length && !forceFail) {
+      replaceTransfers((prev) => {
         const pendingKeys = new Set(
           prev
             .filter((t) => t.status === "held")
             .map((t) => `${t.factId}:${t.toDomain}`)
         );
-        const fresh = makeTransferEntries(held, domain, query).filter(
-          (t) => !pendingKeys.has(`${t.factId}:${t.toDomain}`)
-        );
+        const fresh = makeTransferEntries(
+          partitioned.held,
+          nextDomain,
+          nextQuery
+        ).filter((t) => !pendingKeys.has(`${t.factId}:${t.toDomain}`));
         return fresh.length ? [...fresh, ...prev] : prev;
       });
     }
+    const extraConstraints = nextFacts
+      .filter(
+        (f) =>
+          (f.source === "feedback" || f.source === "inferred") && !f.withheld
+      )
+      .filter((f) =>
+        (f.scopes?.length ? f.scopes : [f.domain]).includes(nextDomain)
+      )
+      .map((f) => f.text);
     try {
       const response = await fetch("/api/discover", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          query,
-          domain,
+          query: nextQuery,
+          domain: nextDomain,
           model,
           forceFail,
-          facts: allowed,
+          facts: partitioned.allowed,
+          constraints: extraConstraints,
         }),
       });
       const data = await response.json();
@@ -112,6 +489,97 @@ export default function Page() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function factsForProfile(id) {
+    if (Array.isArray(factsByProfileRef.current[id])) {
+      return factsByProfileRef.current[id];
+    }
+    return assembleFacts(
+      id,
+      extrasRef.current,
+      overridesRef.current,
+      deletedRef.current
+    );
+  }
+
+  function startAsPerson() {
+    loadProfile("me");
+    setQuery(SHOE_QUERY.query);
+    setDomain("ecommerce");
+    setResults([]);
+    setFeedbackNote("");
+    setBeat(1);
+    setTab("discover");
+  }
+
+  async function pullTheIntent() {
+    loadProfile("me");
+    const nextFacts = factsForProfile("me");
+    setBeat(2);
+    setFeedbackNote("");
+    await retrieve({
+      query: SHOE_QUERY.query,
+      domain: "ecommerce",
+      facts: nextFacts,
+    });
+  }
+
+  async function crossTheBoundary() {
+    loadProfile("me");
+    const nextFacts = factsForProfile("me");
+    setBeat(3);
+    setFeedbackNote(
+      "A shoe budget is still an ecommerce fact. It will not enter this healthcare pull unless you approve the transfer."
+    );
+    await retrieve({
+      query: CARE_QUERY.query,
+      domain: "healthcare",
+      facts: nextFacts,
+    });
+  }
+
+  function rememberFit(result) {
+    if (!activeProfile) loadProfile("me");
+    addCustomFact({
+      id: crypto.randomUUID(),
+      text: `Wants more destinations like ${result.name} (${result.host})`,
+      domain,
+      source: "inferred",
+      confidence: 0.72,
+      scopes: [domain],
+      withheld: false,
+      createdAt: new Date().toISOString(),
+    });
+    setResults((prev) => {
+      const rest = prev.filter((r) => r.url !== result.url);
+      return [{ ...result, feedback: "fit" }, ...rest];
+    });
+    setFeedbackNote(
+      `Kept. “${result.name}” is now an inferred preference in the world model — inspect, correct, or delete it.`
+    );
+  }
+
+  function rejectDestination(result) {
+    if (!activeProfile) loadProfile("me");
+    addCustomFact({
+      id: crypto.randomUUID(),
+      text: `Do not return ${result.name} (${result.url})`,
+      domain,
+      source: "feedback",
+      confidence: 0.95,
+      scopes: [domain],
+      withheld: false,
+      createdAt: new Date().toISOString(),
+    });
+    setResults((prev) =>
+      prev.map((r) =>
+        r.url === result.url ? { ...r, feedback: "rejected" } : r
+      )
+    );
+    setFeedbackNote(
+      `Held out. “${result.name}” will constrain the next ${domain} pull. You stayed in authority.`
+    );
   }
 
   async function runEval() {
@@ -184,7 +652,7 @@ export default function Page() {
             </button>
           </nav>
           <div className="nav-end">
-            <span>Verified after generation</span>
+            <span>You stay in authority</span>
           </div>
         </div>
       </header>
@@ -192,12 +660,21 @@ export default function Page() {
         {tab === "discover" ? (
           <>
             <header className="hero">
-              <h1>Pull only what the web can prove.</h1>
+              <h1>Discovery that starts with the person, not the platform.</h1>
               <p>
-                Generation stays inside the model. Exact, host, and none are
-                computed on the server after search URLs are harvested.
+                Say what you want to find. AI explores. The server checks
+                whether those destinations actually appeared in search. Your
+                world model stays yours — a shoe budget does not silently become
+                a healthcare constraint.
               </p>
             </header>
+            <ThesisBeats
+              beat={beat}
+              loading={loading}
+              onPerson={startAsPerson}
+              onPull={pullTheIntent}
+              onBoundary={crossTheBoundary}
+            />
             <div className="stage">
               <Discover
                 query={query}
@@ -209,18 +686,56 @@ export default function Page() {
                 forceFail={forceFail}
                 setForceFail={setForceFail}
                 loading={loading}
-                onPull={retrieve}
+                onPull={() => retrieve()}
                 results={results}
                 meta={meta}
+                allowed={allowed}
+                held={held}
+                pendingHolds={pendingHolds}
+                feedbackNote={feedbackNote}
+                onFit={rememberFit}
+                onReject={rejectDestination}
+                onApproveHold={(entry) => {
+                  const updated = applyTransferDecision(
+                    facts,
+                    entry,
+                    "approve"
+                  ).find((f) => f.id === entry.factId);
+                  if (updated) {
+                    patchFact(entry.factId, {
+                      scopes: updated.scopes,
+                      withheld: updated.withheld,
+                    });
+                  }
+                  replaceTransfers((prev) =>
+                    prev.map((t) =>
+                      t.id === entry.id ? { ...t, status: "approve" } : t
+                    )
+                  );
+                }}
+                onKeepHold={(entry) => {
+                  patchFact(entry.factId, { withheld: true });
+                  replaceTransfers((prev) =>
+                    prev.map((t) =>
+                      t.id === entry.id ? { ...t, status: "withhold" } : t
+                    )
+                  );
+                }}
               />
               <WorldModel
                 facts={facts}
-                setFacts={setFacts}
-                transfers={transfers}
-                setTransfers={setTransfers}
                 activeProfile={activeProfile}
-                seedProfile={seedProfile}
+                customProfiles={customProfiles}
                 domain={domain}
+                loadProfile={loadProfile}
+                createProfile={createProfile}
+                renameProfile={renameProfile}
+                deleteProfile={deleteProfile}
+                restoreSeedFacts={restoreSeedFacts}
+                onAddFact={addCustomFact}
+                onDeleteFact={removeFact}
+                onUpdateFact={patchFact}
+                onClearFacts={clearCurrentProfileFacts}
               />
             </div>
           </>
@@ -238,6 +753,122 @@ export default function Page() {
   );
 }
 
+function ThesisBeats({ beat, loading, onPerson, onPull, onBoundary }) {
+  const actions = [onPerson, onPull, onBoundary];
+  return (
+    <ol className="thesis">
+      {THESIS_BEATS.map((item, i) => (
+        <li
+          key={item.id}
+          className={`thesis-beat ${beat === i + 1 ? "active" : ""}`}
+        >
+          <span className="thesis-n">{item.n}</span>
+          <div>
+            <h2>{item.title}</h2>
+            <p>{item.body}</p>
+            <button
+              className={beat === i + 1 ? "btn" : "btn ghost"}
+              type="button"
+              disabled={loading}
+              onClick={actions[i]}
+            >
+              {loading && beat === i + 1 ? "Working…" : item.cta}
+            </button>
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function BoundaryBoard({
+  domain,
+  allowed,
+  held,
+  pendingHolds,
+  onApproveHold,
+  onKeepHold,
+}) {
+  const holdByFact = new Map(
+    pendingHolds.map((entry) => [entry.factId, entry])
+  );
+
+  return (
+    <section className="boundary">
+      <div className="boundary-col">
+        <h3>This {domain} search can use</h3>
+        {allowed.length === 0 ? (
+          <p className="muted">
+            Nothing from the world model is in scope yet. Load a profile, or
+            this search runs without personal constraints.
+          </p>
+        ) : (
+          <ul className="boundary-used">
+            {allowed.map((f) => (
+              <li key={f.id}>{f.text}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className={`boundary-col hold ${held.length ? "alert" : ""}`}>
+        <h3>Not in this search unless you allow it</h3>
+        {held.length === 0 ? (
+          <p className="muted">
+            Every loaded fact is already allowed for {domain}.
+          </p>
+        ) : (
+          <>
+            <p className="boundary-note">
+              Same person, different part of life. Each fact below stays out of
+              this {domain} search until you choose.
+            </p>
+            <div className="hold-list">
+              {held.map((fact) => {
+                const scopes = (fact.scopes?.length
+                  ? fact.scopes
+                  : [fact.domain]
+                ).join(", ");
+                const entry = holdByFact.get(fact.id) || {
+                  id: `preview:${fact.id}:${domain}`,
+                  factId: fact.id,
+                  text: fact.text,
+                  fromDomain: fact.domain,
+                  toDomain: domain,
+                };
+                return (
+                  <article className="hold-card" key={fact.id}>
+                    <p>{fact.text}</p>
+                    <p className="muted">
+                      Allowed in {scopes}. This search is {domain}, so it is
+                      sitting out.
+                    </p>
+                    <div className="actions">
+                      <button
+                        className="icon-btn"
+                        type="button"
+                        onClick={() => onApproveHold(entry)}
+                      >
+                        Use in {domain}
+                      </button>
+                      <button
+                        className="icon-btn"
+                        type="button"
+                        onClick={() => onKeepHold(entry)}
+                      >
+                        Keep out
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function Discover({
   query,
   setQuery,
@@ -251,12 +882,24 @@ function Discover({
   onPull,
   results,
   meta,
+  allowed,
+  held,
+  pendingHolds,
+  feedbackNote,
+  onFit,
+  onReject,
+  onApproveHold,
+  onKeepHold,
 }) {
   const samples = [
     { ...SAMPLE_QUERIES[0], label: "Waterproof shoes" },
     { ...SAMPLE_QUERIES[1], label: "After-hours care" },
     { ...SAMPLE_QUERIES[2], label: "Robotics camp" },
     { ...SAMPLE_QUERIES[3], label: "Trade contractors" },
+  ];
+  const visible = [
+    ...results.filter((r) => r.feedback !== "rejected"),
+    ...results.filter((r) => r.feedback === "rejected"),
   ];
 
   return (
@@ -271,11 +914,11 @@ function Discover({
         <textarea
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="What should be pulled from the world, not invented?"
+          placeholder="What do you want to find, understand, or accomplish?"
         />
         <div className="composer-row">
           <button className="btn" disabled={loading} type="submit">
-            {loading ? "Pulling…" : "Pull destinations"}
+            {loading ? "Exploring, then verifying…" : "Pull destinations"}
           </button>
         </div>
         <div className="composer-row">
@@ -314,7 +957,7 @@ function Discover({
             checked={forceFail}
             onChange={(e) => setForceFail(e.target.checked)}
           />
-          Intentional failure
+          Stop before the model acts
         </label>
       </form>
       <div className="samples">
@@ -331,6 +974,15 @@ function Discover({
           </button>
         ))}
       </div>
+      <BoundaryBoard
+        domain={domain}
+        allowed={allowed}
+        held={held}
+        pendingHolds={pendingHolds}
+        onApproveHold={onApproveHold}
+        onKeepHold={onKeepHold}
+      />
+      {feedbackNote ? <div className="banner">{feedbackNote}</div> : null}
       {meta.message ? (
         <div className={`banner ${meta.forceFail || meta.usedDemo ? "warn" : ""}`}>
           {meta.message}
@@ -338,22 +990,29 @@ function Discover({
           {meta.model ? ` · ${meta.provider}/${meta.model}` : ""}
         </div>
       ) : null}
+      {loading ? (
+        <div className="empty">
+          Generation stays inside the model. Verification is computed afterward
+          from harvested search URLs — a fluent answer is not a verified result.
+        </div>
+      ) : null}
       {results.length === 0 && !loading ? (
         <div className="empty">
-          Load a profile, then pull. Exact means the URL was in the search-tool
-          harvest. Host means the path was invented. None means it was never
-          seen.
+          Play the three beats above. You should see a person, then proven
+          destinations, then a domain boundary that waits for you.
         </div>
       ) : results.length ? (
         <>
-          <TierMix results={results} />
+          <TierMix results={results} harvested={meta.harvestedUrls.length} />
           <div className="results">
-            {results.map((result) => (
+            {visible.map((result) => (
               <ResultCard
                 key={`${result.host}${result.pathname}${result.url}`}
                 result={result}
                 constraints={meta.constraints}
                 harvestedUrls={meta.harvestedUrls}
+                onFit={onFit}
+                onReject={onReject}
               />
             ))}
           </div>
@@ -363,7 +1022,7 @@ function Discover({
   );
 }
 
-function TierMix({ results }) {
+function TierMix({ results, harvested }) {
   const exact = results.filter((r) => r.tier === "exact").length;
   const host = results.filter((r) => r.tier === "host").length;
   const none = results.filter((r) => r.tier === "none").length;
@@ -401,19 +1060,23 @@ function TierMix({ results }) {
         })}
       </svg>
       <div>
-        <h2>Verification mix</h2>
+        <h2>What search could prove</h2>
+        <p className="mix-lead">
+          {harvested || 0} harvested search URLs. Proven means the generated
+          destination was in that harvest — not that the model sounded confident.
+        </p>
         <div className="legend">
           <div>
             <span className="dot" style={{ background: "#5b53f5" }} />
-            <b>{Math.round((exact / total) * 100)}%</b> exact
+            <b>{exact}</b> {TIER_COPY.exact.label}
           </div>
           <div>
             <span className="dot" style={{ background: "#b7b0d9" }} />
-            <b>{Math.round((host / total) * 100)}%</b> host
+            <b>{host}</b> {TIER_COPY.host.label}
           </div>
           <div>
             <span className="dot" style={{ background: "#ddd9e8" }} />
-            <b>{Math.round((none / total) * 100)}%</b> none
+            <b>{none}</b> {TIER_COPY.none.label}
           </div>
         </div>
       </div>
@@ -421,10 +1084,13 @@ function TierMix({ results }) {
   );
 }
 
-function ResultCard({ result, constraints, harvestedUrls }) {
+function ResultCard({ result, constraints, harvestedUrls, onFit, onReject }) {
   const why = formatWhy(result, constraints);
+  const copy = TIER_COPY[result.tier] || TIER_COPY.none;
+  const rejected = result.feedback === "rejected";
+  const fit = result.feedback === "fit";
   return (
-    <article className="card">
+    <article className={`card ${rejected ? "rejected" : ""} ${fit ? "fit" : ""}`}>
       <div className="card-head">
         <div>
           <h3>{result.name}</h3>
@@ -432,17 +1098,36 @@ function ResultCard({ result, constraints, harvestedUrls }) {
             {result.url}
           </a>
         </div>
-        <span className={`badge ${result.tier}`}>{result.tier}</span>
+        <span className={`badge ${result.tier}`}>{copy.label}</span>
       </div>
       <p className="why">{why}</p>
       {result.note ? <p className="why muted">{result.note}</p> : null}
+      <p className="tier-hint">{copy.hint}</p>
       <div className="badge-row">
         <span className="badge">corroborated ×{result.corroboration || 1}</span>
         {(result.constraintIndices || []).map((i) => (
           <span className="badge" key={i}>
-            constraint {i}
+            {constraints?.[i] || `constraint ${i}`}
           </span>
         ))}
+      </div>
+      <div className="actions">
+        <button
+          className="icon-btn"
+          type="button"
+          disabled={fit}
+          onClick={() => onFit(result)}
+        >
+          {fit ? "Kept in world model" : "Fits me"}
+        </button>
+        <button
+          className="icon-btn"
+          type="button"
+          disabled={rejected}
+          onClick={() => onReject(result)}
+        >
+          {rejected ? "Held out" : "Not this"}
+        </button>
       </div>
       <div className="ledger">
         generated {result.url}
@@ -456,14 +1141,53 @@ function ResultCard({ result, constraints, harvestedUrls }) {
   );
 }
 
+function displayProfileName(activeProfile, customProfiles) {
+  const builtin = builtinById(activeProfile);
+  if (builtin) return builtin.label.replace(/^Load /, "");
+  const custom = customProfiles.find((p) => p.id === activeProfile);
+  return custom?.label || activeProfile || "empty";
+}
+
+function ScopeToggles({ scopes, onChange }) {
+  return (
+    <div className="scope-toggles">
+      {DOMAINS.map((d) => {
+        const on = scopes.includes(d);
+        return (
+          <button
+            key={d}
+            type="button"
+            className={`pill-btn ${on ? "on" : ""}`}
+            onClick={() =>
+              onChange(
+                on
+                  ? scopes.filter((s) => s !== d)
+                  : [...scopes, d]
+              )
+            }
+          >
+            {d}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function WorldModel({
   facts,
-  setFacts,
-  transfers,
-  setTransfers,
   activeProfile,
-  seedProfile,
+  customProfiles,
   domain,
+  loadProfile,
+  createProfile,
+  renameProfile,
+  deleteProfile,
+  restoreSeedFacts,
+  onAddFact,
+  onDeleteFact,
+  onUpdateFact,
+  onClearFacts,
 }) {
   const [draft, setDraft] = useState({
     text: "",
@@ -471,45 +1195,47 @@ function WorldModel({
     confidence: 0.8,
     scopes: ["ecommerce"],
   });
-  const pending = [];
-  const seenHeld = new Set();
-  for (const entry of transfers.filter((t) => t.status === "held")) {
-    const key = `${entry.factId}:${entry.toDomain}`;
-    if (seenHeld.has(key)) continue;
-    seenHeld.add(key);
-    pending.push(entry);
-  }
+  const [newProfileName, setNewProfileName] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [edit, setEdit] = useState(null);
 
   function addFact(e) {
     e.preventDefault();
     if (!draft.text.trim()) return;
-    setFacts((prev) => [
-      {
-        id: crypto.randomUUID(),
-        text: draft.text.trim(),
-        domain: draft.domain,
-        source: "stated",
-        confidence: Number(draft.confidence) || 0.5,
-        scopes: draft.scopes,
-        withheld: false,
-        createdAt: new Date().toISOString(),
-      },
-      ...prev,
-    ]);
+    onAddFact({
+      id: crypto.randomUUID(),
+      text: draft.text.trim(),
+      domain: draft.domain,
+      source: "stated",
+      confidence: Number(draft.confidence) || 0.5,
+      scopes: draft.scopes.length ? draft.scopes : [draft.domain],
+      withheld: false,
+      createdAt: new Date().toISOString(),
+    });
     setDraft({ ...draft, text: "" });
   }
 
-  function updateFact(id, patch) {
-    setFacts((prev) => prev.map((f) => (f.id === id ? { ...f, ...patch } : f)));
+  function startEdit(fact) {
+    setEditingId(fact.id);
+    setEdit({
+      text: fact.text,
+      domain: fact.domain,
+      confidence: fact.confidence,
+      scopes: [...(fact.scopes || [fact.domain])],
+    });
   }
 
-  function decide(entry, decision) {
-    setFacts((prev) => applyTransferDecision(prev, entry, decision));
-    setTransfers((prev) =>
-      prev.map((t) =>
-        t.id === entry.id ? { ...t, status: decision } : t
-      )
-    );
+  function saveEdit(e) {
+    e.preventDefault();
+    if (!edit?.text.trim()) return;
+    onUpdateFact(editingId, {
+      text: edit.text.trim(),
+      domain: edit.domain,
+      confidence: Number(edit.confidence) || 0.5,
+      scopes: edit.scopes.length ? edit.scopes : [edit.domain],
+    });
+    setEditingId(null);
+    setEdit(null);
   }
 
   function exportFacts() {
@@ -524,23 +1250,78 @@ function WorldModel({
     URL.revokeObjectURL(url);
   }
 
+  function submitNewProfile(e) {
+    e.preventDefault();
+    const name = newProfileName.trim();
+    if (!name) return;
+    createProfile(name);
+    setNewProfileName("");
+  }
+
   return (
     <aside className="panel white side">
       <div className="side-head">
         <h2>Current profile</h2>
-        <span className="muted">{activeProfile || "empty"}</span>
+        <span className="muted">
+          {displayProfileName(activeProfile, customProfiles)}
+        </span>
       </div>
       <div className="profile-grid">
-        {PROFILE_BUTTONS.map((p) => (
+        {BUILTIN_PROFILES.map((p) => (
           <button
             key={p.id}
             className={activeProfile === p.id ? "btn" : "btn ghost"}
-            onClick={() => seedProfile(p.factory, p.id)}
+            onClick={() => loadProfile(p.id)}
           >
             {p.label}
           </button>
         ))}
+        {customProfiles.map((p) => (
+          <div className="profile-row" key={p.id}>
+            <button
+              className={activeProfile === p.id ? "btn" : "btn ghost"}
+              onClick={() => loadProfile(p.id)}
+            >
+              {p.label}
+            </button>
+            <button
+              className="icon-btn"
+              type="button"
+              onClick={() => {
+                const next = window.prompt("Rename profile", p.label);
+                if (next != null) renameProfile(p.id, next);
+              }}
+            >
+              Rename
+            </button>
+            <button
+              className="icon-btn"
+              type="button"
+              onClick={() => {
+                if (
+                  window.confirm(
+                    `Delete profile “${p.label}” and its facts?`
+                  )
+                ) {
+                  deleteProfile(p.id);
+                }
+              }}
+            >
+              Delete
+            </button>
+          </div>
+        ))}
       </div>
+      <form className="profile-new" onSubmit={submitNewProfile}>
+        <input
+          placeholder="New profile name"
+          value={newProfileName}
+          onChange={(e) => setNewProfileName(e.target.value)}
+        />
+        <button className="btn ghost" type="submit">
+          Add profile
+        </button>
+      </form>
       <div className="section-title">
         <h2>Facts</h2>
         <span className="muted">{facts.length}</span>
@@ -554,18 +1335,25 @@ function WorldModel({
         />
         <select
           value={draft.domain}
-          onChange={(e) =>
+          onChange={(e) => {
+            const nextDomain = e.target.value;
             setDraft({
               ...draft,
-              domain: e.target.value,
-              scopes: [e.target.value],
-            })
-          }
+              domain: nextDomain,
+              scopes: draft.scopes.includes(nextDomain)
+                ? draft.scopes
+                : [...draft.scopes, nextDomain],
+            });
+          }}
         >
           {DOMAINS.map((d) => (
             <option key={d}>{d}</option>
           ))}
         </select>
+        <ScopeToggles
+          scopes={draft.scopes}
+          onChange={(scopes) => setDraft({ ...draft, scopes })}
+        />
         <input
           type="number"
           min="0"
@@ -582,16 +1370,17 @@ function WorldModel({
         <button className="icon-btn" onClick={exportFacts} type="button">
           Export
         </button>
-        <button
-          className="icon-btn"
-          type="button"
-          onClick={() => {
-            setFacts([]);
-            setTransfers([]);
-            setActiveProfile(null);
-          }}
-        >
-          Delete all
+        {builtinById(activeProfile) ? (
+          <button
+            className="icon-btn"
+            type="button"
+            onClick={restoreSeedFacts}
+          >
+            Restore built-in facts
+          </button>
+        ) : null}
+        <button className="icon-btn" type="button" onClick={onClearFacts}>
+          Delete all facts
         </button>
       </div>
       <div className="fact-list">
@@ -600,85 +1389,113 @@ function WorldModel({
             key={fact.id}
             className={`fact ${fact.withheld ? "withheld" : ""}`}
           >
-            <div className="scope-pills">
-              <span className="pill">{fact.domain}</span>
-              {(fact.scopes || []).map((s) => (
-                <span className="pill" key={s}>
-                  {s}
-                </span>
-              ))}
-              <span className="pill">{Math.round(fact.confidence * 100)}%</span>
-            </div>
-            <p>{fact.text}</p>
-            <div className="actions">
-              <button
-                className="icon-btn"
-                type="button"
-                onClick={() => {
-                  const next = window.prompt("Correct this fact", fact.text);
-                  if (next != null) updateFact(fact.id, { text: next });
-                }}
-              >
-                Correct
-              </button>
-              <button
-                className="icon-btn"
-                type="button"
-                onClick={() => updateFact(fact.id, { withheld: !fact.withheld })}
-              >
-                {fact.withheld ? "Restore" : "Withhold"}
-              </button>
-              <button
-                className="icon-btn"
-                type="button"
-                onClick={() =>
-                  setFacts((prev) => prev.filter((f) => f.id !== fact.id))
-                }
-              >
-                Delete
-              </button>
-            </div>
+            {editingId === fact.id && edit ? (
+              <form className="fact-form fact-edit" onSubmit={saveEdit}>
+                <textarea
+                  rows={3}
+                  value={edit.text}
+                  onChange={(e) => setEdit({ ...edit, text: e.target.value })}
+                />
+                <select
+                  value={edit.domain}
+                  onChange={(e) =>
+                    setEdit({ ...edit, domain: e.target.value })
+                  }
+                >
+                  {DOMAINS.map((d) => (
+                    <option key={d}>{d}</option>
+                  ))}
+                </select>
+                <ScopeToggles
+                  scopes={edit.scopes}
+                  onChange={(scopes) => setEdit({ ...edit, scopes })}
+                />
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={edit.confidence}
+                  onChange={(e) =>
+                    setEdit({ ...edit, confidence: e.target.value })
+                  }
+                />
+                <div className="actions">
+                  <button className="btn ghost" type="submit">
+                    Save
+                  </button>
+                  <button
+                    className="icon-btn"
+                    type="button"
+                    onClick={() => {
+                      setEditingId(null);
+                      setEdit(null);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <>
+                <div className="scope-pills">
+                  {[
+                    ...new Set(
+                      [fact.domain, ...(fact.scopes || [])].filter(Boolean)
+                    ),
+                  ].map((s) => (
+                    <span className="pill" key={s}>
+                      {s}
+                    </span>
+                  ))}
+                  <span className="pill">
+                    {Math.round(fact.confidence * 100)}%
+                  </span>
+                  {fact.custom ? <span className="pill">added</span> : null}
+                  <span className="pill">
+                    {SOURCE_COPY[fact.source] || fact.source || "stated"}
+                  </span>
+                </div>
+                <p>{fact.text}</p>
+                <div className="actions">
+                  <button
+                    className="icon-btn"
+                    type="button"
+                    onClick={() => startEdit(fact)}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    className="icon-btn"
+                    type="button"
+                    onClick={() =>
+                      onUpdateFact(fact.id, { withheld: !fact.withheld })
+                    }
+                  >
+                    {fact.withheld ? "Restore" : "Withhold"}
+                  </button>
+                  <button
+                    className="icon-btn"
+                    type="button"
+                    onClick={() => onDeleteFact(fact.id)}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         ))}
       </div>
       <div className="section-title">
-        <h2>Held at the domain boundary</h2>
-        <span className="muted">active {domain}</span>
+        <h2>Outside this search</h2>
+        <span className="muted">{domain}</span>
       </div>
-      {pending.length === 0 ? (
-        <p className="muted">
-          Cross-domain facts stay here until you approve a transfer. A shoe
-          budget never silently enters a healthcare pull.
-        </p>
-      ) : (
-        pending.map((entry) => (
-          <div className="held" key={entry.id}>
-            <p>
-              {entry.text}
-              <br />
-              <span className="muted">
-                {entry.fromDomain} → {entry.toDomain}
-              </span>
-            </p>
-            <div className="actions">
-              <button
-                className="icon-btn"
-                type="button"
-                onClick={() => decide(entry, "approve")}
-              >
-                Approve transfer
-              </button>
-              <button
-                className="icon-btn"
-                type="button"
-                onClick={() => decide(entry, "withhold")}
-              >
-                Keep withheld
-              </button>
-            </div>
-          </div>
-        ))
-      )}
+      <p className="muted">
+        Facts that are not scoped to {domain} wait on the discovery panel. Allow
+        or keep out each one there — a shoe budget never silently enters
+        healthcare.
+      </p>
     </aside>
   );
 }
@@ -687,11 +1504,12 @@ function Evaluation({ running, onRun, runs, summary, model }) {
   return (
     <>
       <header className="hero">
-        <h1>Same four queries, every time.</h1>
+        <h1>Prove discovery, not engagement.</h1>
         <p className="eval-intro">
-          Resolvable-destination rate is the share of destinations whose URL
-          exactly matched a harvested search-tool URL. The client never computes
-          tiers.
+          Same four intentions, every time. Resolvable-destination rate is the
+          share of destinations whose URL exactly matched a harvested search
+          URL. Measure successful discovery alongside latency and cost — the
+          client never computes tiers.
         </p>
       </header>
       <div className="eval-actions">
